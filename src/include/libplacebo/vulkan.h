@@ -385,6 +385,20 @@ PL_API pl_swapchain pl_vulkan_create_swapchain(pl_vulkan vk,
 // who have `params->allow_suboptimal` enabled.
 PL_API bool pl_vulkan_swapchain_suboptimal(pl_swapchain sw);
 
+// Returns true when this Vulkan swapchain can pass a desired presentation time
+// to the platform using VK_GOOGLE_display_timing. This is intentionally a
+// capability query because callers should retain their existing pacing path
+// when the extension is unavailable.
+PL_API bool pl_vulkan_swapchain_supports_present_timing(pl_swapchain sw);
+
+// Submit the started frame with an optional desired presentation timestamp.
+// `desired_present_time_ns` is in the VK_GOOGLE_display_timing clock domain
+// (CLOCK_MONOTONIC nanoseconds on Linux). A value of 0 requests normal
+// immediate submission semantics. The started frame is consumed on return just
+// like pl_swapchain_submit_frame().
+PL_API bool pl_vulkan_swapchain_submit_frame_at(pl_swapchain sw,
+                                                 uint64_t desired_present_time_ns);
+
 // Vulkan interop API, for sharing a single VkDevice (and associated vulkan
 // resources) directly with the API user. The use of this API is a bit sketchy
 // and requires careful communication of Vulkan API state.
@@ -520,9 +534,10 @@ struct pl_vulkan_wrap_params {
 // pl_tex_* API calls on it (see `pl_vulkan_release_ex`).
 //
 // This wrapper can be destroyed by simply calling `pl_tex_destroy` on it,
-// which will not destroy the underlying VkImage. If a pl_tex wrapper is
-// destroyed while an image is not currently being held by the user, that
-// image is left in an undefined state.
+// which will not destroy the underlying VkImage. `user_data` or `debug_tag`
+// are ignored. Note that this `pl_tex` is *not* considered held after calling
+// this function - the user must explicitly `pl_vulkan_hold_ex` before accessing
+// the VkImage.
 //
 // Wrapping the same VkImage multiple times is undefined behavior, as is trying
 // to wrap an image belonging to a different VkDevice than the one in use by
