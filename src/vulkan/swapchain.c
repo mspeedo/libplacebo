@@ -55,6 +55,8 @@ struct priv {
     bool suboptimal;                // true once VK_SUBOPTIMAL_KHR is returned
     bool needs_recreate;            // swapchain needs to be recreated
     bool has_swapchain_maintenance1;
+    bool has_display_timing;
+    uint32_t present_id;
     struct pl_color_repr color_repr;
     struct pl_color_space color_space;
     struct pl_hdr_metadata hdr_metadata;
@@ -294,7 +296,7 @@ static bool pick_surf_format(pl_swapchain sw, const struct pl_color_space *hint)
             case PL_FMT_SNORM: score += 2; break;
             case PL_FMT_FLOAT: score += 1; break;
             case PL_FMT_TYPE_COUNT: pl_unreachable();
-            };
+            }
 
             if (score > best_score) {
                 best_score = score;
@@ -396,6 +398,14 @@ pl_swapchain pl_vulkan_create_swapchain(pl_vulkan plvk,
     p->surf = params->surface;
     p->swapchain_depth = PL_DEF(params->swapchain_depth, 3);
     p->has_swapchain_maintenance1 = sw_maint_features && sw_maint_features->swapchainMaintenance1;
+#ifdef VK_GOOGLE_display_timing
+    for (int i = 0; i < plvk->num_extensions; i++) {
+        if (strcmp(plvk->extensions[i], VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) == 0) {
+            p->has_display_timing = true;
+            break;
+        }
+    }
+#endif
     pl_assert(p->swapchain_depth > 0);
     atomic_init(&p->frames_in_flight, 0);
     p->protoInfo = (VkSwapchainCreateInfoKHR) {
@@ -950,7 +960,7 @@ static void present_cb(struct priv *p, void *arg)
 
 VK_CB_FUNC_DEF(present_cb);
 
-static bool vk_sw_submit_frame(pl_swapchain sw)
+static bool vk_sw_submit_frame_at(pl_swapchain sw, uint64_t desired_present_time_ns)
 {
     pl_gpu gpu = sw->gpu;
     struct priv *p = PL_PRIV(sw);
@@ -1013,8 +1023,30 @@ static bool vk_sw_submit_frame(pl_swapchain sw)
     if (current->fences_out.num > 0) {
         VkFence *pfence = &current->fences_out.elem[idx];
         fenceInfo.pFences = pfence;
-        pinfo.pNext = &fenceInfo;
+        vk_link_struct(&pinfo, &fenceInfo);
     }
+
+#ifdef VK_GOOGLE_display_timing
+    VkPresentTimeGOOGLE present_time = {0};
+    VkPresentTimesInfoGOOGLE present_times = {0};
+    if (desired_present_time_ns != 0 && p->has_display_timing) {
+        uint32_t present_id = ++p->present_id;
+        if (present_id == 0)
+            present_id = ++p->present_id;
+        present_time = (VkPresentTimeGOOGLE) {
+            .presentID = present_id,
+            .desiredPresentTime = desired_present_time_ns,
+        };
+        present_times = (VkPresentTimesInfoGOOGLE) {
+            .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE,
+            .swapchainCount = 1,
+            .pTimes = &present_time,
+        };
+        vk_link_struct(&pinfo, &present_times);
+    }
+#else
+    (void) desired_present_time_ns;
+#endif
 
     PL_TRACE(vk, "vkQueuePresentKHR waits on 0x%"PRIx64, (uint64_t) sem_out);
     vk->lock_queue(vk->queue_ctx, pool->qf, qidx);
@@ -1039,6 +1071,11 @@ static bool vk_sw_submit_frame(pl_swapchain sw)
                vk_res_str(res));
         return false;
     }
+}
+
+static bool vk_sw_submit_frame(pl_swapchain sw)
+{
+    return vk_sw_submit_frame_at(sw, 0);
 }
 
 static void vk_sw_swap_buffers(pl_swapchain sw)
@@ -1103,6 +1140,23 @@ bool pl_vulkan_swapchain_suboptimal(pl_swapchain sw)
 {
     struct priv *p = PL_PRIV(sw);
     return p->suboptimal;
+}
+
+PL_API bool pl_vulkan_swapchain_supports_present_timing(pl_swapchain sw)
+{
+#ifdef VK_GOOGLE_display_timing
+    struct priv *p = PL_PRIV(sw);
+    return p->has_display_timing;
+#else
+    (void) sw;
+    return false;
+#endif
+}
+
+PL_API bool pl_vulkan_swapchain_submit_frame_at(pl_swapchain sw,
+                                                 uint64_t desired_present_time_ns)
+{
+    return vk_sw_submit_frame_at(sw, desired_present_time_ns);
 }
 
 static const struct pl_sw_fns vulkan_swapchain = {
